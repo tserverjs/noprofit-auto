@@ -13,7 +13,7 @@ on:
 jobs:
   auto-login:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
       - name: 🟢 配置 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '20'
           cache: 'npm'
 
       - name: 📦 安装 npm 依赖
@@ -32,28 +32,40 @@ jobs:
             npm install
           fi
 
-      - name: 🎭 安装 Playwright 浏览器（含系统依赖，检测缓存）
-        id: playwright-install
+      - name: 🦊 安装 Camoufox 反检测浏览器（含系统依赖）
+        id: camoufox-install
         run: |
-          echo "🔍 检查已缓存的 Playwright 浏览器..."
-          INSTALL_BROWSERS=true
-          if npx playwright install --dry-run chromium 2>&1 | grep -q "already installed"; then
-            echo "✅ 浏览器已在缓存中，无需重新下载"
-            INSTALL_BROWSERS=false
+          echo "🔍 检查Camoufox浏览器缓存..."
+          CAMOFOX_CACHE_DIR="$HOME/.cache/camoufox"
+          INSTALL_CAMOFOX=true
+          if [ -f "${CAMOFOX_CACHE_DIR}/version.json" ]; then
+            echo "✅ Camoufox浏览器已在缓存中，无需重新下载"
+            INSTALL_CAMOFOX=false
           fi
-          if [ "$INSTALL_BROWSERS" = "true" ]; then
-            echo "⬇️ 下载 Chromium 浏览器和系统依赖..."
-            npx playwright install --with-deps chromium
-          else
-            echo "⬇️ 安装浏览器依赖库..."
-            npx playwright install-deps chromium
+          
+          if [ "$INSTALL_CAMOFOX" = "true" ]; then
+            echo "⬇️ 下载Camoufox反检测浏览器二进制..."
+            npx camoufox-js fetch
           fi
-          echo "🔍 验证浏览器二进制..."
-          if [ ! -f $(npx playwright get-path chromium) ] && [ ! -f $(npx playwright get-path chrome-headless-shell) ]; then
-            echo "❌ 浏览器二进制缺失，强制重新安装..."
-            npx playwright install --with-deps chromium
+          
+          echo "🔧 安装Firefox运行所需系统依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libdbus-1-3 libgtk-3-0 libgbm1 libasound2 \
+            libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 \
+            libxi6 libxtst6 libnss3 libcups2 libxss1 libxrandr2 \
+            libpangocairo-1.0-0 libatk1.0-0 libcairo-gobject2 \
+            libgtk-3-0 libgdk-pixbuf2.0-0 libpango-1.0-0 libcairo2 \
+            libasound2 libatspi2.0-0 libdrm2 libxkbcommon0 libxshmfence1 \
+            fonts-liberation fonts-noto-cjk ca-certificates
+          
+          echo "🔍 验证Camoufox二进制..."
+          if [ ! -f "${CAMOFOX_CACHE_DIR}/camoufox-bin/camoufox-bin" ] && [ ! -f "${CAMOFOX_CACHE_DIR}/camoufox-bin/firefox" ]; then
+            echo "❌ Camoufox二进制缺失，强制重新下载..."
+            npx camoufox-js fetch
           fi
-          echo "✅ Playwright 环境就绪"
+          
+          echo "✅ Camoufox反检测浏览器环境就绪"
 
       - name: 🚀 启动 GOST 代理隧道
         id: gost
@@ -65,7 +77,7 @@ jobs:
             exit 1
           fi
           echo "⬇️ 获取 GOST 最新版本并下载..."
-          GOST_VERSION=$(curl -s https://api.github.com/repos/go-gost/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          GOST_VERSION=$(curl -s --noproxy "*" https://api.github.com/repos/go-gost/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
           echo "📦 GOST 版本: $GOST_VERSION"
           wget -q "https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz"
           tar -xzf gost_${GOST_VERSION}_linux_amd64.tar.gz
@@ -91,7 +103,7 @@ jobs:
           echo "EXIT_IP=${EXIT_IP}" >> $GITHUB_OUTPUT
           echo "✅ GOST 代理隧道已就绪，当前代理出口 IP: ${EXIT_IP}"
 
-      - name: ▶️ 执行自动登录（仅浏览器走代理，其他操作走直连）
+      - name: ▶️ 执行自动登录（Camoufox反检测引擎）
         id: run-login
         env:
           NOPROFIT_USERNAME: ${{ secrets.NOPROFIT_USERNAME }}
@@ -100,7 +112,7 @@ jobs:
           TZ: Asia/Shanghai
         run: |
           mkdir -p recordings
-          echo "📝 开始执行自动登录脚本..."
+          echo "📝 开始执行自动登录脚本（Camoufox C++级反检测）..."
           node login.js 2>&1 | tee login-output.log
           LOGIN_SUCCESS=false
           if grep -q "🎉 所有操作完成！登录成功" login-output.log; then
@@ -120,6 +132,7 @@ jobs:
           STATUS="${{ steps.run-login.outputs.status }}"
           EXIT_IP="${{ steps.gost.outputs.EXIT_IP }}"
           echo "## 🔑 noprofit 自动登录结果" >> $GITHUB_STEP_SUMMARY
+          echo "- 🦊 浏览器引擎: Camoufox (C++级反检测Firefox)" >> $GITHUB_STEP_SUMMARY
           echo "- ⏰ 运行时间: ${RUN_TIME} (北京时间)" >> $GITHUB_STEP_SUMMARY
           echo "- 🌐 代理出口IP: ${EXIT_IP}" >> $GITHUB_STEP_SUMMARY
           if [ "$STATUS" = "success" ]; then
@@ -146,15 +159,14 @@ jobs:
           EXIT_IP="${{ steps.gost.outputs.EXIT_IP }}"
           if [ "$STATUS" = "success" ]; then
             TITLE="✅ noprofit 自动登录成功"
-            COLOR="info"
-            DESC="登录流程已完成，账号保活成功"
+            DESC="Camoufox反检测引擎已通过Cloudflare验证，账号保活成功"
           else
             TITLE="❌ noprofit 自动登录失败"
-            COLOR="warning"
             DESC="登录失败，请下载录制视频排查问题"
           fi
           echo "📤 正在发送企业微信通知..."
-          curl -sS --max-time 15 \
+          # 强制不走代理，直连企业微信
+          curl -sS --max-time 15 --noproxy "*" \
             -H "Content-Type: application/json" \
             -X POST \
             -d @- \
@@ -162,10 +174,10 @@ jobs:
           {
             "msgtype": "markdown",
             "markdown": {
-              "content": "## ${TITLE}\n> 运行时间: <font color=\"comment\">${RUN_TIME} (北京时间)</font>\n> 代理出口IP: <font color=\"comment\">${EXIT_IP}</font>\n> ${DESC}\n\n[🔗 点击查看运行详情](${RUN_URL})\n[🎥 下载操作录制视频排查问题](${RUN_URL}#artifacts)"
+              "content": "## ${TITLE}\n> 🦊 引擎: Camoufox 反检测浏览器\n> 运行时间: <font color=\"comment\">${RUN_TIME} (北京时间)</font>\n> 代理出口IP: <font color=\"comment\">${EXIT_IP}</font>\n> ${DESC}\n\n[🔗 点击查看运行详情](${RUN_URL})\n[🎥 下载操作录制视频排查问题](${RUN_URL}#artifacts)"
             }
           }
-          EOF
+EOF
           echo ""
           echo "✅ 通知已发送"
 
