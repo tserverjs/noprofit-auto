@@ -231,45 +231,83 @@ try {
       }
       await page.waitForTimeout(800 + Math.random() * 1500);
 
-      // 勾选"保持登录"复选框（如果存在）
-      const rememberCheckbox = await page.$('input[type="checkbox"][name*="remember"], input[type="checkbox"]:not([name*="agree"])');
-      if (rememberCheckbox) {
-        console.log('☑️  勾选保持登录选项...');
-        if (!await rememberCheckbox.isChecked()) {
-          await rememberCheckbox.click({ delay: 100 + Math.random() * 200 });
+      // 勾选 "I agree" 复选框（必须勾选）
+      // 页面结构里该复选框通过 label 文本（"I agree to the ..."）关联，name 属性不可靠
+      // 做法：遍历页面上所有 checkbox，读取其关联的 label 文本 / aria-label / name，
+      // 命中 agree / terms / tos 关键词的就勾选
+      console.log('☑️  查找并勾选 "I agree" 复选框...');
+      let agreeChecked = false;
+      const allCheckboxes = page.locator('input[type="checkbox"]');
+      const cbCount = await allCheckboxes.count();
+      for (let i = 0; i < cbCount; i++) {
+        const cb = allCheckboxes.nth(i);
+        if (!await cb.isVisible()) continue;
+        const relatedText = await cb.evaluate(el => {
+          const closestLabel = el.closest('label')?.textContent?.trim() || '';
+          const forLabel = el.id
+            ? document.querySelector(`label[for="${el.id}"]`)?.textContent?.trim() || ''
+            : '';
+          const ariaLabel = el.getAttribute('aria-label') || '';
+          return `${forLabel} ${closestLabel} ${ariaLabel} ${el.name || ''}`;
+        });
+        if (/i agree|agree to|terms|tos/i.test(relatedText)) {
+          if (!await cb.isChecked()) {
+            console.log(`   找到同意条款复选框（关联文本: ${relatedText.trim().slice(0, 60)}），正在勾选...`);
+            await cb.click();
+          } else {
+            console.log('   同意条款复选框已处于勾选状态');
+          }
+          agreeChecked = true;
+          break;
         }
-        await page.waitForTimeout(300 + Math.random() * 500);
+      }
+      if (!agreeChecked) {
+        // 兜底：部分实现用隐藏的受控 checkbox + 可见的 label 切换样式
+        const fallback = page.locator('label:has-text("I agree")').first();
+        if (await fallback.count() > 0) {
+          console.log('   通过 label 文本直接点击 "I agree" 区域...');
+          await fallback.click();
+          agreeChecked = true;
+        }
+      }
+      if (agreeChecked) {
+        await page.waitForTimeout(500 + Math.random() * 500);
+      } else {
+        console.log('⚠️  未找到 "I agree" 复选框，继续执行（可能是注册流程专属）');
       }
 
-      // 勾选"同意条款"复选框（如果存在 - noprofit注册/登录通常有这个）
-      const agreeCheckbox = await page.$('input[type="checkbox"][name*="agree"], input[type="checkbox"][name*="terms"]');
-      if (agreeCheckbox) {
-        console.log('☑️  勾选同意服务条款...');
-        if (!await agreeCheckbox.isChecked()) {
-          await agreeCheckbox.click({ delay: 100 + Math.random() * 200 });
-        }
-        await page.waitForTimeout(300 + Math.random() * 500);
-      }
-
-      // 再次处理Cloudflare Turnstile验证（如果出现在表单里）
+      // 处理Cloudflare Turnstile验证（如果出现在表单里）
       const hasTurnstile = await page.$('iframe[src*="challenges.cloudflare.com"], .cf-turnstile');
       if (hasTurnstile) {
-        console.log('🛡️  检测到表单中的Turnstile验证，等待自动完成...');
-        // 尝试点击验证框（隐形验证不需要，显式的需要）
-        const turnstileFrame = await page.frameLocator('iframe[src*="challenges.cloudflare.com"]').first();
-        const checkbox = await turnstileFrame.locator('.ctp-checkbox-label, input[type="checkbox"]').count();
-        if (checkbox > 0) {
-          console.log('🔘 点击Turnstile验证复选框...');
-          await turnstileFrame.locator('.ctp-checkbox-label').click({ timeout: 10000 }).catch(() => {});
+        console.log('🛡️  检测到表单中的Turnstile验证，尝试点击验证框...');
+        // 遍历所有Turnstile iframe，逐个点击其中的复选框
+        const turnstileFrames = page.locator('iframe[src*="challenges.cloudflare.com"]');
+        const frameCount = await turnstileFrames.count();
+        for (let i = 0; i < frameCount; i++) {
+          const frame = turnstileFrames.nth(i).contentFrame();
+          if (!frame) continue;
+          // 按优先级尝试不同的选择器
+          const selectors = ['.ctp-checkbox-label', 'input[type="checkbox"]', 'label'];
+          for (const sel of selectors) {
+            const box = frame.locator(sel).first();
+            if (await box.count() > 0) {
+              console.log(`🔘 点击Turnstile验证框（iframe #${i + 1}, 选择器: ${sel}）...`);
+              await box.click({ timeout: 15000 }).catch(() => {
+                console.log(`⚠️  点击 ${sel} 失败，尝试下一个选择器...`);
+              });
+              break;
+            }
+          }
+          await page.waitForTimeout(1000 + Math.random() * 1000);
         }
         // 等待验证完成 - 最长60秒
         await page.waitForFunction(() => {
-          // 检查验证是否成功：错误提示消失 或者 验证成功状态
-          const turnstile = document.querySelector('.cf-turnstile');
-          if (!turnstile) return true;
-          return turnstile.classList.contains('cf-turnstile-completed') || 
-                 turnstile.getAttribute('data-state') === 'verified' ||
-                 document.querySelector('[name="cf-turnstile-response"]')?.value?.length > 0;
+          // 所有Turnstile容器都应进入完成/成功状态
+          const wrappers = document.querySelectorAll('.cf-turnstile');
+          if (wrappers.length === 0) return true;
+          return Array.from(wrappers).every(el =>
+            el.classList.contains('cf-turnstile-completed') ||
+            el.classList.contains('cf-turnstile-success'));
         }, { timeout: 60000 }).catch(e => {
           console.log('⚠️  Turnstile验证等待超时，尝试继续...');
         });
