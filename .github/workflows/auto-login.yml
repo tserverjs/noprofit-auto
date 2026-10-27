@@ -1,0 +1,136 @@
+name: 🔄 noprofit.space 自动登录
+
+on:
+  schedule:
+    # 默认每天 UTC 0:00 执行（北京时间 8:00），可根据需要调整cron表达式
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 支持手动触发运行，方便测试
+    inputs:
+      reason:
+        description: '手动触发原因'
+        required: false
+        default: '手动测试运行'
+
+jobs:
+  auto-login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+
+      - name: 🟢 配置 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 🌐 启动 GOST 代理隧道
+        env:
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+        run: |
+          if [ -z "${GOST_PROXY}" ]; then
+            echo "❌ 致命错误: 未在仓库配置 secrets.GOST_PROXY"
+            echo "请参考README配置GOST上游代理地址，格式：relay+tls://... 或 socks5://..."
+            exit 1
+          fi
+          echo "⬇️ 获取 GOST 最新版本并下载..."
+          GOST_VERSION=$(curl -s https://api.github.com/repos/go-gost/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          echo "📦 GOST 版本: $GOST_VERSION"
+          wget -q "https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz"
+          tar -xzf gost_${GOST_VERSION}_linux_amd64.tar.gz
+          chmod +x ./gost
+          echo "🚀 启动 GOST 本地转发 (SOCKS5 服务端口: 40000)..."
+          nohup ./gost -L socks5://:40000 -F "${GOST_PROXY}" > gost.log 2>&1 &
+          sleep 6
+          echo "🔍 测试 GOST 代理连接状态..."
+          EXIT_IP=$(curl -s --max-time 10 --proxy socks5://127.0.0.1:40000 https://api.ipify.org || true)
+          if [ -z "${EXIT_IP}" ]; then
+            echo "❌ 代理隧道连接失败，正在打印 gost 日志..."
+            cat gost.log
+            exit 1
+          fi
+          echo "✅ GOST 代理隧道已就绪，当前代理出口 IP: ${EXIT_IP}"
+          echo "EXIT_IP=${EXIT_IP}" >> $GITHUB_ENV
+          echo "PROXY_SERVER=socks5://127.0.0.1:40000" >> $GITHUB_ENV
+
+      - name: 📦 安装依赖
+        run: |
+          npm install
+          npx playwright install chromium --with-deps
+
+      - name: 🚀 执行自动登录脚本
+        id: login
+        env:
+          NOPROFIT_USERNAME: ${{ secrets.NOPROFIT_USERNAME }}
+          NOPROFIT_PASSWORD: ${{ secrets.NOPROFIT_PASSWORD }}
+          PROXY_SERVER: ${{ env.PROXY_SERVER }}
+        run: |
+          mkdir -p recordings
+          node login.js
+          echo "login_status=success" >> $GITHUB_OUTPUT
+
+      - name: 📋 生成运行结果摘要
+        if: always()
+        run: |
+          echo "## 📊 自动登录运行结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ⏰ 运行时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 代理出口 IP: ${{ env.EXIT_IP }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 📹 操作视频和截图已保存在下方 Artifacts 中，可下载查看完整过程" >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 上传操作录制和截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-recording-${{ github.run_id }}
+          path: |
+            recordings/
+            gost.log
+          retention-days: 30
+
+      - name: 📢 企业微信机器人通知
+        if: always()
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          RUN_STATUS: ${{ steps.login.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXIT_IP: ${{ env.EXIT_IP }}
+          RUN_TIME: ${{ env.RUN_TIME }}
+        run: |
+          if [ -z "${WECOM_WEBHOOK}" ]; then
+            echo "⚠️  未配置 WECOM_WEBHOOK，跳过企业微信通知"
+            exit 0
+          fi
+
+          CURRENT_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+          
+          if [ "${RUN_STATUS}" == "success" ]; then
+            # 登录成功通知
+            curl -s -X POST "${WECOM_WEBHOOK}" \
+              -H 'Content-Type: application/json' \
+              -d @- <<EOF
+          {
+            "msgtype": "markdown",
+            "markdown": {
+              "content": "## ✅ noprofit.space 自动登录成功\n> 运行时间：${CURRENT_TIME}\n> 代理出口IP：<font color=\"info\">${EXIT_IP}</font>\n> \n[查看运行详情](${RUN_URL})\n> 📹 完整操作视频和截图请到 Actions 页面下载 Artifact 查看"
+            }
+          }
+          EOF
+            echo "✅ 登录成功通知已发送到企业微信"
+          else
+            # 登录失败通知
+            curl -s -X POST "${WECOM_WEBHOOK}" \
+              -H 'Content-Type: application/json' \
+              -d @- <<EOF
+          {
+            "msgtype": "markdown",
+            "markdown": {
+              "content": "## ❌ noprofit.space 自动登录失败\n> 运行时间：${CURRENT_TIME}\n> 代理出口IP：<font color=\"warning\">${EXIT_IP}</font>\n> 错误原因：<font color=\"comment\">请查看运行日志和操作录制排查问题</font>\n> \n[查看运行详情](${RUN_URL})\n> 📹 请下载 Artifact 中的操作视频查看具体是哪一步出错"
+            }
+          }
+          EOF
+            echo "❌ 登录失败通知已发送到企业微信"
+          fi
