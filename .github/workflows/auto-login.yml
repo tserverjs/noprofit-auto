@@ -1,28 +1,62 @@
-name: noprofit.space 自动登录
+name: 自动登录 noprofit.space
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 每天 UTC 0:00 执行（北京时间早8点）
-  workflow_dispatch:      # 支持手动触发
+    - cron: '0 0 * * *'  # 每天 UTC 0 点（北京时间 8 点）执行一次
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      reason:
+        description: '手动触发原因'
+        required: false
+        default: '手动测试运行'
 
 jobs:
   auto-login:
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # 代理+Cloudflare验证需要更长时间
-    env:
-      TZ: Asia/Shanghai  # 设置时区为北京时间
-
+    timeout-minutes: 20
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v4
 
-      - name: 📦 安装 Node.js 环境
+      - name: 🟢 配置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      - name: 🌐 启动 GOST 代理隧道
+      - name: 📦 安装 npm 依赖
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: 🎭 安装 Playwright 浏览器（含系统依赖，检测缓存）
+        id: playwright-install
+        run: |
+          echo "🔍 检查已缓存的 Playwright 浏览器..."
+          INSTALL_BROWSERS=true
+          if npx playwright install --dry-run chromium 2>&1 | grep -q "already installed"; then
+            echo "✅ 浏览器已在缓存中，无需重新下载"
+            INSTALL_BROWSERS=false
+          fi
+          if [ "$INSTALL_BROWSERS" = "true" ]; then
+            echo "⬇️ 下载 Chromium 浏览器和系统依赖..."
+            npx playwright install --with-deps chromium
+          else
+            echo "⬇️ 安装浏览器依赖库..."
+            npx playwright install-deps chromium
+          fi
+          echo "🔍 验证浏览器二进制..."
+          if [ ! -f $(npx playwright get-path chromium) ] && [ ! -f $(npx playwright get-path chrome-headless-shell) ]; then
+            echo "❌ 浏览器二进制缺失，强制重新安装..."
+            npx playwright install --with-deps chromium
+          fi
+          echo "✅ Playwright 环境就绪"
+
+      - name: 🚀 启动 GOST 代理隧道
+        id: gost
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
@@ -38,84 +72,104 @@ jobs:
           chmod +x ./gost
           echo "🚀 启动 GOST 本地转发 (SOCKS5 服务端口: 40000)..."
           nohup ./gost -L socks5://:40000 -F "${GOST_PROXY}" > gost.log 2>&1 &
-          sleep 10  # 加长等待时间，确保代理完全启动
+          sleep 10
           echo "🔍 测试 GOST 代理连接状态..."
-          EXIT_IP=$(curl -s --max-time 15 --retry 3 --retry-delay 2 --proxy socks5://127.0.0.1:40000 https://api.ipify.org || true)
+          EXIT_IP=""
+          for i in 1 2 3; do
+            EXIT_IP=$(curl -s --max-time 10 --proxy socks5://127.0.0.1:40000 https://api.ipify.org || true)
+            if [ -n "$EXIT_IP" ]; then
+              break
+            fi
+            echo "⏳ 第 $i 次测试失败，等待3秒重试..."
+            sleep 3
+          done
           if [ -z "${EXIT_IP}" ]; then
             echo "❌ 代理隧道连接失败，正在打印 gost 日志..."
             cat gost.log
             exit 1
           fi
+          echo "EXIT_IP=${EXIT_IP}" >> $GITHUB_OUTPUT
           echo "✅ GOST 代理隧道已就绪，当前代理出口 IP: ${EXIT_IP}"
-          echo "EXIT_IP=${EXIT_IP}" >> $GITHUB_ENV
 
-      - name: 📦 安装依赖和浏览器
-        run: |
-          npm ci
-          # 安装 Chromium 及全部系统依赖
-          npx playwright install chromium --with-deps
+      - name: ▶️ 执行自动登录（仅浏览器走代理，其他操作走直连）
+        id: run-login
         env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/ms-playwright
-
-      - name: 🔑 配置登录凭证
+          NOPROFIT_USERNAME: ${{ secrets.NOPROFIT_USERNAME }}
+          NOPROFIT_PASSWORD: ${{ secrets.NOPROFIT_PASSWORD }}
+          PROXY_SERVER: socks5://127.0.0.1:40000
+          TZ: Asia/Shanghai
         run: |
-          echo "NOPROFIT_USERNAME=${{ secrets.NOPROFIT_USERNAME }}" >> .env
-          echo "NOPROFIT_PASSWORD=${{ secrets.NOPROFIT_PASSWORD }}" >> .env
-          echo "PROXY_SERVER=socks5://127.0.0.1:40000" >> .env
-
-      - name: 🚀 执行自动登录脚本
-        id: login
-        run: |
-          set -e
-          npm start 2>&1 | tee login-output.log
-          echo "login_success=true" >> $GITHUB_OUTPUT
-        # 即使失败也继续执行后续上传步骤
-        continue-on-error: true
-
-      - name: ✅ 判断登录结果
-        id: result
-        run: |
+          mkdir -p recordings
+          echo "📝 开始执行自动登录脚本..."
+          node login.js 2>&1 | tee login-output.log
+          LOGIN_SUCCESS=false
           if grep -q "🎉 所有操作完成！登录成功" login-output.log; then
+            LOGIN_SUCCESS=true
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "登录成功 ✅"
+            echo "✅ 登录成功"
           else
-            echo "status=failure" >> $GITHUB_OUTPUT
-            echo "登录失败 ❌"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ 登录失败"
+            exit 0
           fi
 
-      - name: 📢 发送企业微信结果通知
-        if: always() && env.WECOM_WEBHOOK != ''
+      - name: 📊 输出运行结果到 GitHub 摘要
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_TIME=$(TZ=Asia/Shanghai date +"%Y-%m-%d %H:%M:%S")
+          STATUS="${{ steps.run-login.outputs.status }}"
+          EXIT_IP="${{ steps.gost.outputs.EXIT_IP }}"
+          echo "## 🔑 noprofit 自动登录结果" >> $GITHUB_STEP_SUMMARY
+          echo "- ⏰ 运行时间: ${RUN_TIME} (北京时间)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 代理出口IP: ${EXIT_IP}" >> $GITHUB_STEP_SUMMARY
+          if [ "$STATUS" = "success" ]; then
+            echo "- 🎉 登录结果: ✅ 成功" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- 🎉 登录结果: ❌ 失败" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- 🔗 运行详情: [点击查看](${RUN_URL})" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎥 操作录制: 请下载下方 artifacts 查看完整操作视频和截图" >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 发送企业微信通知
+        if: always()
+        continue-on-error: true
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-          LOGIN_STATUS: ${{ steps.result.outputs.status }}
-          EXIT_IP: ${{ env.EXIT_IP }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUN_TIME: ${{ vars.RUN_TIME || '' }}
+          STATUS: ${{ steps.run-login.outputs.status }}
         run: |
-          # 获取北京时间
-          RUN_TIME=$(TZ="Asia/Shanghai" date "+%Y-%m-%d %H:%M:%S")
-          if [ "$LOGIN_STATUS" = "success" ]; then
-            MSG_TITLE="✅ noprofit 自动登录成功"
-            MSG_COLOR="info"
-            MSG_CONTENT="出口IP: ${EXIT_IP}\n运行时间: ${RUN_TIME}\n[点击查看运行详情和操作视频](${RUN_URL})"
-          else
-            MSG_TITLE="❌ noprofit 自动登录失败"
-            MSG_COLOR="warning"
-            MSG_CONTENT="出口IP: ${EXIT_IP}\n运行时间: ${RUN_TIME}\n[点击查看错误截图和操作视频排查问题](${RUN_URL})"
+          if [ -z "${WECOM_WEBHOOK}" ]; then
+            echo "⚠️ 未配置 WECOM_WEBHOOK，跳过通知"
+            exit 0
           fi
-          
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_TIME=$(TZ=Asia/Shanghai date +"%Y-%m-%d %H:%M:%S")
+          EXIT_IP="${{ steps.gost.outputs.EXIT_IP }}"
+          if [ "$STATUS" = "success" ]; then
+            TITLE="✅ noprofit 自动登录成功"
+            COLOR="info"
+            DESC="登录流程已完成，账号保活成功"
+          else
+            TITLE="❌ noprofit 自动登录失败"
+            COLOR="warning"
+            DESC="登录失败，请下载录制视频排查问题"
+          fi
           echo "📤 正在发送企业微信通知..."
-          curl -s -X POST "${WECOM_WEBHOOK}" \
-            -H 'Content-Type: application/json' \
-            -d "{
-              \"msgtype\": \"markdown\",
-              \"markdown\": {
-                \"content\": \"## ${MSG_TITLE}\n>${MSG_CONTENT}\"
-              }
-            }"
+          curl -sS --max-time 15 \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d @- \
+            "${WECOM_WEBHOOK}" <<EOF
+          {
+            "msgtype": "markdown",
+            "markdown": {
+              "content": "## ${TITLE}\n> 运行时间: <font color=\"comment\">${RUN_TIME} (北京时间)</font>\n> 代理出口IP: <font color=\"comment\">${EXIT_IP}</font>\n> ${DESC}\n\n[🔗 点击查看运行详情](${RUN_URL})\n[🎥 下载操作录制视频排查问题](${RUN_URL}#artifacts)"
+            }
+          }
+          EOF
+          echo ""
           echo "✅ 通知已发送"
 
-      - name: 📤 上传操作录制、截图和日志
+      - name: 📦 上传操作录制和日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -124,16 +178,5 @@ jobs:
             recordings/
             gost.log
             login-output.log
-            storage-state.json
           retention-days: 30
           if-no-files-found: warn
-
-      - name: 📝 写入运行摘要
-        if: always()
-        run: |
-          echo "## 🚀 noprofit 自动登录运行结果" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- 运行状态: ${{ steps.result.outputs.status == 'success' && '✅ 成功' || '❌ 失败' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- 代理出口IP: `${{ env.EXIT_IP || '未知' }}`" >> $GITHUB_STEP_SUMMARY
-          echo "- 运行时间: $(TZ="Asia/Shanghai" date "+%Y-%m-%d %H:%M:%S")" >> $GITHUB_STEP_SUMMARY
-          echo "- 操作视频和截图请下载下方 Artifact 查看" >> $GITHUB_STEP_SUMMARY
