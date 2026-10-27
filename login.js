@@ -14,7 +14,8 @@ try {
   const username = process.env.NOPROFIT_USERNAME;
   const password = process.env.NOPROFIT_PASSWORD;
   const proxyServer = process.env.PROXY_SERVER; // 例如 socks5://127.0.0.1:40000
-  const maxRetries = 3;
+  const maxRetries = 1; // 重试已关闭：单次尝试失败即结束（可用 LOGIN_MAX_RETRIES 环境变量临时覆盖）
+  const effectiveRetries = Math.max(1, parseInt(process.env.LOGIN_MAX_RETRIES || String(maxRetries), 10));
 
   if (!username || !password) {
     console.error('❌ 错误: 请设置 NOPROFIT_USERNAME 和 NOPROFIT_PASSWORD 环境变量');
@@ -54,13 +55,13 @@ try {
   }
   console.log(`👤 用户名: ${username}`);
   console.log(`📹 录制目录: ${recordDir}`);
-  console.log(`🔄 最大重试次数: ${maxRetries}`);
+  console.log(`🔄 最大重试次数: ${effectiveRetries}`);
   console.log('═══════════════════════════════════════════════');
 
   let success = false;
   let lastError = null;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; attempt <= effectiveRetries; attempt++) {
     const timestamp = Date.now();
     const videoPath = path.join(recordDir, `attempt-${attempt}-${timestamp}`);
     let browser;
@@ -301,52 +302,82 @@ try {
             el.classList.contains('cf-turnstile-success'));
         });
 
-        // 策略1: 直接点击 iframe 内的复选框
-        let clicked = false;
+        // Turnstile 的 iframe 可能尚未挂载（widget 初始化需要几秒），先等它出现
         const turnstileFrames = page.locator('iframe[src*="challenges.cloudflare.com"]');
-        const frameCount = await turnstileFrames.count();
-        for (let i = 0; i < frameCount; i++) {
+        let frameCount = await turnstileFrames.count();
+        if (frameCount === 0) {
+          console.log('⏳ 暂未检测到Turnstile iframe，等待widget初始化（最长60秒）...');
+          await turnstileFrames.first().waitFor({ state: 'attached', timeout: 60000 }).catch(() => {});
+          frameCount = await turnstileFrames.count();
+        }
+        console.log(`🔍 当前检测到 ${frameCount} 个Turnstile iframe`);
+
+        const pollDone = async (seconds) => {
+          for (let j = 0; j < seconds; j++) {
+            if (await isTurnstileDone()) return true;
+            await page.waitForTimeout(1000);
+          }
+          return isTurnstileDone();
+        };
+
+        let done = false;
+
+        // 策略1: 点击iframe内复选框（选择器逐个尝试；点击被拦截时 force点击 → focus+空格；再不行固定坐标点击）
+        for (let i = 0; i < frameCount && !done; i++) {
           const frame = turnstileFrames.nth(i).contentFrame();
           if (!frame) {
-            console.log(`⚠️  Turnstile iframe #${i + 1} 无法获取 frame 内容`);
+            console.log(`⚠️  iframe #${i + 1} 无法获取frame内容`);
             continue;
           }
-          console.log(`🔍 Turnstile iframe #${i + 1} 地址: ${frame.url()}`);
-          const selectors = ['.ctp-checkbox-label', 'input[type="checkbox"]', 'label'];
-          for (const sel of selectors) {
+          console.log(`🔍 iframe #${i + 1} 地址: ${frame.url()}`);
+          for (const sel of ['.ctp-checkbox-label', 'input[type="checkbox"]', '.ctp-label-container', 'label']) {
             const box = frame.locator(sel).first();
-            if (await box.count() > 0) {
-              console.log(`🔘 尝试点击Turnstile验证框（iframe #${i + 1}, 选择器: ${sel}）...`);
-              await box.click({ timeout: 15000 }).catch(() => {
-                console.log(`⚠️  点击 ${sel} 失败`);
-              });
-              clicked = true;
-              break;
+            if (await box.count() === 0) continue;
+            console.log(`🔘 点击Turnstile验证框（iframe #${i + 1}, 选择器: ${sel}）...`);
+            try {
+              await box.click({ timeout: 15000 });
+            } catch {
+              console.log(`⚠️  常规点击 ${sel} 失败，尝试 force 点击 / focus+空格...`);
+              try {
+                await box.click({ force: true, timeout: 10000 });
+              } catch {
+                await box.focus({ timeout: 10000 }).catch(() => {});
+                await page.keyboard.press('Space');
+              }
             }
+            done = await pollDone(30);
+            if (done) break;
           }
-          if (clicked) break;
-        }
-        if (!clicked) {
-          console.log('⚠️  未能直接点击iframe内验证框，改用键盘方式触发...');
-        }
-
-        // 等待 15 秒看是否完成
-        let done = false;
-        for (let i = 0; i < 15; i++) {
-          if (await isTurnstileDone()) { done = true; break; }
-          await page.waitForTimeout(1000);
+          if (!done) {
+            console.log(`🔘 尝试iframe固定坐标点击（验证框约在 32,32 位置）...`);
+            await turnstileFrames.nth(i).click({ position: { x: 32, y: 32 }, timeout: 10000 }).catch(() => {});
+            done = await pollDone(30);
+          }
         }
 
-        // 策略2: 键盘方式触发（iframe 点击失效时的备用方案）
+        // 策略2: Tab键把焦点从 "I agree" 复选框移到Turnstile widget，再按 空格/回车
         if (!done) {
-          console.log('⌨️  键盘触发Turnstile: 回车 ×2 → 空格 ×1 ...');
-          // 先把焦点放回 "I agree" 复选框，再按序按键
+          console.log('⌨️  Tab键将焦点移入Turnstile后按 空格/回车 ...');
           const legalCheck = page.locator('input[type="checkbox"][name*="legal"], input[type="checkbox"][name*="acceptan"]').first();
           if (await legalCheck.count() > 0) {
             await legalCheck.focus().catch(() => {});
-          } else {
-            const cfWidget = page.locator('.cf-turnstile').first();
-            if (await cfWidget.count() > 0) await cfWidget.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(300);
+            await page.keyboard.press('Tab');
+            await page.waitForTimeout(600);
+            for (const key of ['Space', 'Enter']) {
+              await page.keyboard.press(key);
+              done = await pollDone(20);
+              if (done) break;
+            }
+          }
+        }
+
+        // 策略3: 你确认的序列（焦点在 "I agree" 复选框：回车 ×2 → 空格 ×1）
+        if (!done) {
+          console.log('⌨️  键盘触发Turnstile: 回车 ×2 → 空格 ×1 ...');
+          const legalCheck = page.locator('input[type="checkbox"][name*="legal"], input[type="checkbox"][name*="acceptan"]').first();
+          if (await legalCheck.count() > 0) {
+            await legalCheck.focus().catch(() => {});
           }
           await page.waitForTimeout(500);
           await page.keyboard.press('Enter');
@@ -354,14 +385,10 @@ try {
           await page.keyboard.press('Enter');
           await page.waitForTimeout(700 + Math.random() * 500);
           await page.keyboard.press('Space');
-
-          for (let i = 0; i < 45; i++) {
-            if (await isTurnstileDone()) { done = true; break; }
-            await page.waitForTimeout(1000);
-          }
+          done = await pollDone(45);
         }
 
-        // 策略3: 键盘没生效时，把焦点直接放进 Turnstile 容器再按键
+        // 策略4: 把焦点直接放进 .cf-turnstile 容器再按键
         if (!done) {
           console.log('⌨️  将焦点置于Turnstile容器后重试: 空格 / 回车...');
           const cfWidget = page.locator('.cf-turnstile').first();
@@ -370,11 +397,22 @@ try {
             await page.waitForTimeout(500);
             for (const key of ['Space', 'Enter']) {
               await page.keyboard.press(key);
-              for (let i = 0; i < 30; i++) {
-                if (await isTurnstileDone()) { done = true; break; }
-                await page.waitForTimeout(1000);
-              }
+              done = await pollDone(30);
               if (done) break;
+            }
+          }
+        }
+
+        // 兜底：上面的按键/触发可能让表单重渲染，"I agree" 被重置，点击登录前重新确认勾选
+        {
+          const legalCheck = page.locator('input[type="checkbox"][name*="legal"], input[type="checkbox"][name*="acceptan"]').first();
+          if (await legalCheck.count() > 0) {
+            let checked = true;
+            try { checked = await legalCheck.isChecked(); } catch (e) {}
+            if (!checked) {
+              console.log('☑️  "I agree" 复选框被重置，重新勾选...');
+              await legalCheck.click().catch(() => {});
+              await page.waitForTimeout(500);
             }
           }
         }
@@ -388,7 +426,7 @@ try {
           const cls = await page.evaluate(() =>
             Array.from(document.querySelectorAll('.cf-turnstile'))
               .map(el => el.className).join(' | '));
-          console.log(`⚠️  Turnstile验证未完成（token长度: ${tokenLen}, 容器类名: ${cls || '无'}）`);
+          console.log(`⚠️  Turnstile验证未完成（token长度: ${tokenLen}, iframe数: ${frameCount}, 容器类名: ${cls || '无'}）`);
         }
         await page.waitForTimeout(2000);
       }
@@ -525,7 +563,7 @@ try {
         }
       }
 
-      if (attempt < maxRetries) {
+      if (attempt < effectiveRetries) {
         const waitTime = 10 + attempt * 5; // 第一次10秒，第二次15秒
         console.log(`⏳ 等待 ${waitTime} 秒后进行第 ${attempt + 1} 次重试...`);
         await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
@@ -538,7 +576,7 @@ try {
     console.log('🎉 所有操作完成！登录成功');
     process.exit(0);
   } else {
-    console.log(`💔 登录失败，已重试 ${maxRetries} 次`);
+    console.log(`💔 登录失败，已重试 ${effectiveRetries} 次`);
     console.log(`最后错误: ${lastError?.message}`);
     console.log('请查看 recordings 目录下的视频和截图排查问题');
     process.exit(1);
