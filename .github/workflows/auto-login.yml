@@ -35,20 +35,20 @@ jobs:
       - name: 🦊 安装 Camoufox 反检测浏览器（含系统依赖）
         id: camoufox-install
         run: |
-          echo "🔍 检查Camoufox浏览器缓存..."
+          echo "🔍 检查 Camoufox 浏览器缓存..."
           CAMOFOX_CACHE_DIR="$HOME/.cache/camoufox"
           INSTALL_CAMOFOX=true
           if [ -f "${CAMOFOX_CACHE_DIR}/version.json" ]; then
-            echo "✅ Camoufox浏览器已在缓存中，无需重新下载"
+            echo "✅ Camoufox 浏览器已在缓存中，无需重新下载"
             INSTALL_CAMOFOX=false
           fi
           
           if [ "$INSTALL_CAMOFOX" = "true" ]; then
-            echo "⬇️ 下载Camoufox反检测浏览器二进制..."
+            echo "⬇️ 下载 Camoufox 反检测浏览器二进制..."
             npx camoufox-js fetch
           fi
           
-          echo "🔧 安装Firefox运行所需系统依赖..."
+          echo "🔧 安装 Firefox 运行所需系统依赖..."
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             libdbus-1-3 libgtk-3-0 libgbm1 libasound2 \
@@ -59,13 +59,13 @@ jobs:
             libasound2 libatspi2.0-0 libdrm2 libxkbcommon0 libxshmfence1 \
             fonts-liberation fonts-noto-cjk ca-certificates
           
-          echo "🔍 验证Camoufox二进制..."
+          echo "🔍 验证 Camoufox 二进制..."
           if [ ! -f "${CAMOFOX_CACHE_DIR}/camoufox-bin/camoufox-bin" ] && [ ! -f "${CAMOFOX_CACHE_DIR}/camoufox-bin/firefox" ]; then
-            echo "❌ Camoufox二进制缺失，强制重新下载..."
+            echo "❌ Camoufox 二进制缺失，强制重新下载..."
             npx camoufox-js fetch
           fi
           
-          echo "✅ Camoufox反检测浏览器环境就绪"
+          echo "✅ Camoufox 反检测浏览器环境就绪"
 
       - name: 🚀 启动 GOST 代理隧道
         id: gost
@@ -92,7 +92,7 @@ jobs:
             if [ -n "$EXIT_IP" ]; then
               break
             fi
-            echo "⏳ 第 $i 次测试失败，等待3秒重试..."
+            echo "⏳ 第 $i 次测试失败，等待 3 秒重试..."
             sleep 3
           done
           if [ -z "${EXIT_IP}" ]; then
@@ -103,7 +103,7 @@ jobs:
           echo "EXIT_IP=${EXIT_IP}" >> $GITHUB_OUTPUT
           echo "✅ GOST 代理隧道已就绪，当前代理出口 IP: ${EXIT_IP}"
 
-      - name: ▶️ 执行自动登录（Camoufox反检测引擎）
+      - name: ▶️ 执行自动登录（Camoufox 反检测引擎）
         id: run-login
         env:
           NOPROFIT_USERNAME: ${{ secrets.NOPROFIT_USERNAME }}
@@ -132,9 +132,9 @@ jobs:
           STATUS="${{ steps.run-login.outputs.status }}"
           EXIT_IP="${{ steps.gost.outputs.EXIT_IP }}"
           echo "## 🔑 noprofit 自动登录结果" >> $GITHUB_STEP_SUMMARY
-          echo "- 🦊 浏览器引擎: Camoufox (C++级反检测Firefox)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🦊 浏览器引擎: Camoufox (C++级反检测 Firefox)" >> $GITHUB_STEP_SUMMARY
           echo "- ⏰ 运行时间: ${RUN_TIME} (北京时间)" >> $GITHUB_STEP_SUMMARY
-          echo "- 🌐 代理出口IP: ${EXIT_IP}" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 代理出口 IP: ${EXIT_IP}" >> $GITHUB_STEP_SUMMARY
           if [ "$STATUS" = "success" ]; then
             echo "- 🎉 登录结果: ✅ 成功" >> $GITHUB_STEP_SUMMARY
           else
@@ -159,13 +159,12 @@ jobs:
           EXIT_IP="${{ steps.gost.outputs.EXIT_IP }}"
           if [ "$STATUS" = "success" ]; then
             TITLE="✅ noprofit 自动登录成功"
-            DESC="Camoufox反检测引擎已通过Cloudflare验证，账号保活成功"
+            DESC="Camoufox 反检测引擎已通过 Cloudflare 验证，账号保活成功"
           else
             TITLE="❌ noprofit 自动登录失败"
             DESC="登录失败，请下载录制视频排查问题"
           fi
           echo "📤 正在发送企业微信通知..."
-          # 强制不走代理，直连企业微信
           curl -sS --max-time 15 --noproxy "*" \
             -H "Content-Type: application/json" \
             -X POST \
@@ -174,10 +173,10 @@ jobs:
           {
             "msgtype": "markdown",
             "markdown": {
-              "content": "## ${TITLE}\n> 🦊 引擎: Camoufox 反检测浏览器\n> 运行时间: <font color=\"comment\">${RUN_TIME} (北京时间)</font>\n> 代理出口IP: <font color=\"comment\">${EXIT_IP}</font>\n> ${DESC}\n\n[🔗 点击查看运行详情](${RUN_URL})\n[🎥 下载操作录制视频排查问题](${RUN_URL}#artifacts)"
+              "content": "## ${TITLE}\n> 🦊 引擎: Camoufox 反检测浏览器\n> 运行时间: <font color=\"comment\">${RUN_TIME} (北京时间)</font>\n> 代理出口 IP: <font color=\"comment\">${EXIT_IP}</font>\n> ${DESC}\n\n[🔗 点击查看运行详情](${RUN_URL})\n[🎥 下载操作录制视频排查问题](${RUN_URL}#artifacts)"
             }
           }
-EOF
+          EOF
           echo ""
           echo "✅ 通知已发送"
 
