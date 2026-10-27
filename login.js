@@ -60,6 +60,7 @@ try {
       const camoufoxOptions = {
         headless: true,
         humanize: true, // 启用真人行为模拟：鼠标移动、输入延迟等
+        geoip: true,
         // Firefox 首选项
         firefox_user_prefs: {
           // 禁用自动更新和后台请求
