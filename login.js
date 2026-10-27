@@ -52,79 +52,120 @@ try {
     try {
       console.log(`\n🚀 开始第 ${attempt} 次登录尝试...`);
 
-      // 浏览器启动参数 - 针对 CI + Cloudflare 优化
-      const launchOptions = {
-        headless: true,
-        slowMo: 50, // 操作间隔 50ms，模拟真人速度
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-blink-features=AutomationControlled',
-          '--disable-dev-shm-usage',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-infobars',
-          '--disable-background-networking',
-          '--disable-sync',
-          '--disable-translate',
-          '--disable-extensions',
-          '--disable-default-apps',
-          '--mute-audio',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-web-security', // 绕过CSP限制，避免Cloudflare验证卡住
-        ]
-      };
-
-      // 如果配置了代理，添加到启动选项
-      if (proxyServer) {
-        launchOptions.proxy = {
-          server: proxyServer,
-        };
-        console.log('🔌 代理已启用，所有流量将通过代理转发');
+      // 浏览器启动 - 三级方案，逐级回退：
+      // 1. cloakbrowser（stealth Chromium，Playwright 兼容）
+      // 2. camoufox-js / Camoufox（stealth Firefox，Playwright 原生驱动）
+      // 3. 标准 Playwright Chromium + 反检测注入（最后兜底）
+      // 注意：cloakbrowser 和 camoufox-js 都是 ESM 包，CJS 里必须用动态 import()
+      console.log('🌐 正在启动浏览器（cloakbrowser → Camoufox → 标准 Playwright）...');
+      let useCloak = false;
+      let useCamoufox = false;
+      try {
+        const { launchContext } = await import('cloakbrowser');
+        context = await launchContext({
+          proxy: proxyServer, // 支持 socks5:// 字符串
+          viewport: { width: 1920, height: 1080 },
+          userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          headless: true,
+          // CI 容器环境必需；stealth 参数由 cloakbrowser 自带
+          args: ['--no-sandbox', '--disable-dev-shm-usage'],
+          contextOptions: {
+            recordVideo: { dir: videoPath, size: { width: 1920, height: 1080 } },
+            ignoreHTTPSErrors: true,
+            bypassCSP: true
+          }
+        });
+        browser = context.browser();
+        useCloak = true;
+        console.log('✅ 已使用 cloakbrowser（stealth Chromium）启动，代理:', proxyServer || '无');
+      } catch (e) {
+        console.log(`⚠️  cloakbrowser 不可用或启动失败（${e.message}），尝试 Camoufox...`);
       }
 
-      browser = await chromium.launch(launchOptions);
+      if (!useCloak) {
+        try {
+          // Camoufox：stealth Firefox，指纹/UA/locale 随机生成并全程一致
+          // 首次启动会自动下载 Camoufox 浏览器构建（约百兆级，缓存在 ~/.cache/camoufox）
+          const { Camoufox } = await import('camoufox-js');
+          let camBrowser;
+          try {
+            camBrowser = await Camoufox({
+              proxy: proxyServer, // string 形式支持 socks5://
+              headless: true,
+              locale: 'en-US',
+              humanize: true // 内置拟人化鼠标/键盘，配合 Turnstile 行为检测
+            });
+            context = await camBrowser.newContext({
+              viewport: { width: 1920, height: 1080 },
+              ignoreHTTPSErrors: true,
+              recordVideo: { dir: videoPath, size: { width: 1920, height: 1080 } }
+            });
+            browser = camBrowser;
+            useCamoufox = true;
+            console.log('✅ 已使用 Camoufox（stealth Firefox）启动，代理:', proxyServer || '无');
+          } catch (innerErr) {
+            await camBrowser?.close?.().catch(() => {});
+            throw innerErr;
+          }
+        } catch (e) {
+          console.log(`⚠️  Camoufox 不可用或启动失败（${e.message}），回退到标准 Playwright Chromium...`);
+        }
+      }
 
-      // 创建上下文，配置录制视频
-      context = await browser.newContext({
-        viewport: { width: 1920, height: 1080 },
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        recordVideo: {
-          dir: videoPath,
-          size: { width: 1920, height: 1080 }
-        },
-        ignoreHTTPSErrors: true,
-        bypassCSP: true, // 绕过CSP，解决Cloudflare CSP拦截问题
-      });
-
-      // 绕过 webdriver 检测
-      await context.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', {
-          get: () => undefined,
-        });
-        // 覆盖Chrome自动化属性
-        window.chrome = {
-          runtime: {},
-          loadTimes: function(){},
-          csi: function(){},
-          app: {}
+      if (!useCloak && !useCamoufox) {
+        if (proxyServer) {
+          console.log('🔌 代理已启用，所有流量将通过代理转发');
+        }
+        // 标准 Playwright 启动参数 - 针对 CI + Cloudflare 优化
+        const launchOptions = {
+          headless: true,
+          args: ['--no-sandbox', '--disable-dev-shm-usage']
         };
-        // 伪造插件
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => [1, 2, 3, 4, 5],
+        if (proxyServer) {
+          launchOptions.proxy = { server: proxyServer };
+        }
+        browser = await chromium.launch(launchOptions);
+        context = await browser.newContext({
+          viewport: { width: 1920, height: 1080 },
+          userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          recordVideo: { dir: videoPath, size: { width: 1920, height: 1080 } },
+          ignoreHTTPSErrors: true,
+          bypassCSP: true
         });
-        // 伪造语言
-        Object.defineProperty(navigator, 'languages', {
-          get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+      }
+
+      // 仅标准 Playwright 需要注入反检测脚本；
+      // cloakbrowser / Camoufox 已在浏览器层处理，额外 CDP 注入反而可能被检测
+      if (!useCloak && !useCamoufox) {
+        // 绕过 webdriver 检测
+        await context.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+          });
+          // 覆盖Chrome自动化属性
+          window.chrome = {
+            runtime: {},
+            loadTimes: function(){},
+            csi: function(){},
+            app: {}
+          };
+          // 伪造插件
+          Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5],
+          });
+          // 伪造语言
+          Object.defineProperty(navigator, 'languages', {
+            get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+          });
+          // 伪造权限
+          const originalQuery = window.navigator.permissions.query;
+          window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+              Promise.resolve({ state: Notification.permission }) :
+              originalQuery(parameters)
+          );
         });
-        // 伪造权限
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-          parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
-      });
+      }
 
       page = await context.newPage();
 
@@ -279,38 +320,110 @@ try {
       // 处理Cloudflare Turnstile验证（如果出现在表单里）
       const hasTurnstile = await page.$('iframe[src*="challenges.cloudflare.com"], .cf-turnstile');
       if (hasTurnstile) {
-        console.log('🛡️  检测到表单中的Turnstile验证，尝试点击验证框...');
-        // 遍历所有Turnstile iframe，逐个点击其中的复选框
-        const turnstileFrames = page.locator('iframe[src*="challenges.cloudflare.com"]');
-        const frameCount = await turnstileFrames.count();
-        for (let i = 0; i < frameCount; i++) {
-          const frame = turnstileFrames.nth(i).contentFrame();
-          if (!frame) continue;
-          // 按优先级尝试不同的选择器
-          const selectors = ['.ctp-checkbox-label', 'input[type="checkbox"]', 'label'];
-          for (const sel of selectors) {
-            const box = frame.locator(sel).first();
-            if (await box.count() > 0) {
-              console.log(`🔘 点击Turnstile验证框（iframe #${i + 1}, 选择器: ${sel}）...`);
-              await box.click({ timeout: 15000 }).catch(() => {
-                console.log(`⚠️  点击 ${sel} 失败，尝试下一个选择器...`);
-              });
-              break;
-            }
-          }
-          await page.waitForTimeout(1000 + Math.random() * 1000);
-        }
-        // 等待验证完成 - 最长60秒
-        await page.waitForFunction(() => {
-          // 所有Turnstile容器都应进入完成/成功状态
+        console.log('🛡️  检测到表单中的Turnstile验证...');
+
+        const isTurnstileDone = () => page.evaluate(() => {
+          // 判定条件（任一成立）：
+          // 1. 隐藏字段 cf-turnstile-response 已写入 token（最可靠）
+          const resp = document.querySelector('input[name="cf-turnstile-response"]');
+          if (resp && resp.value && resp.value.length > 0) return true;
+          // 2. 所有 Turnstile 容器进入完成/成功状态
           const wrappers = document.querySelectorAll('.cf-turnstile');
           if (wrappers.length === 0) return true;
           return Array.from(wrappers).every(el =>
             el.classList.contains('cf-turnstile-completed') ||
             el.classList.contains('cf-turnstile-success'));
-        }, { timeout: 60000 }).catch(e => {
-          console.log('⚠️  Turnstile验证等待超时，尝试继续...');
         });
+
+        // 策略1: 直接点击 iframe 内的复选框
+        let clicked = false;
+        const turnstileFrames = page.locator('iframe[src*="challenges.cloudflare.com"]');
+        const frameCount = await turnstileFrames.count();
+        for (let i = 0; i < frameCount; i++) {
+          const frame = turnstileFrames.nth(i).contentFrame();
+          if (!frame) {
+            console.log(`⚠️  Turnstile iframe #${i + 1} 无法获取 frame 内容`);
+            continue;
+          }
+          console.log(`🔍 Turnstile iframe #${i + 1} 地址: ${frame.url()}`);
+          const selectors = ['.ctp-checkbox-label', 'input[type="checkbox"]', 'label'];
+          for (const sel of selectors) {
+            const box = frame.locator(sel).first();
+            if (await box.count() > 0) {
+              console.log(`🔘 尝试点击Turnstile验证框（iframe #${i + 1}, 选择器: ${sel}）...`);
+              await box.click({ timeout: 15000 }).catch(() => {
+                console.log(`⚠️  点击 ${sel} 失败`);
+              });
+              clicked = true;
+              break;
+            }
+          }
+          if (clicked) break;
+        }
+        if (!clicked) {
+          console.log('⚠️  未能直接点击iframe内验证框，改用键盘方式触发...');
+        }
+
+        // 等待 15 秒看是否完成
+        let done = false;
+        for (let i = 0; i < 15; i++) {
+          if (await isTurnstileDone()) { done = true; break; }
+          await page.waitForTimeout(1000);
+        }
+
+        // 策略2: 键盘方式触发（iframe 点击失效时的备用方案）
+        if (!done) {
+          console.log('⌨️  键盘触发Turnstile: 回车 ×2 → 空格 ×1 ...');
+          // 先把焦点放回 "I agree" 复选框，再按序按键
+          const legalCheck = page.locator('input[type="checkbox"][name*="legal"], input[type="checkbox"][name*="acceptan"]').first();
+          if (await legalCheck.count() > 0) {
+            await legalCheck.focus().catch(() => {});
+          } else {
+            const cfWidget = page.locator('.cf-turnstile').first();
+            if (await cfWidget.count() > 0) await cfWidget.click({ force: true }).catch(() => {});
+          }
+          await page.waitForTimeout(500);
+          await page.keyboard.press('Enter');
+          await page.waitForTimeout(700 + Math.random() * 500);
+          await page.keyboard.press('Enter');
+          await page.waitForTimeout(700 + Math.random() * 500);
+          await page.keyboard.press('Space');
+
+          for (let i = 0; i < 45; i++) {
+            if (await isTurnstileDone()) { done = true; break; }
+            await page.waitForTimeout(1000);
+          }
+        }
+
+        // 策略3: 键盘没生效时，把焦点直接放进 Turnstile 容器再按键
+        if (!done) {
+          console.log('⌨️  将焦点置于Turnstile容器后重试: 空格 / 回车...');
+          const cfWidget = page.locator('.cf-turnstile').first();
+          if (await cfWidget.count() > 0) {
+            await cfWidget.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(500);
+            for (const key of ['Space', 'Enter']) {
+              await page.keyboard.press(key);
+              for (let i = 0; i < 30; i++) {
+                if (await isTurnstileDone()) { done = true; break; }
+                await page.waitForTimeout(1000);
+              }
+              if (done) break;
+            }
+          }
+        }
+
+        if (done) {
+          console.log('✅ Turnstile 验证已完成');
+        } else {
+          // 诊断信息：方便下次从 CI 日志定位问题
+          const tokenLen = await page.evaluate(() =>
+            (document.querySelector('input[name="cf-turnstile-response"]')?.value || '').length);
+          const cls = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('.cf-turnstile'))
+              .map(el => el.className).join(' | '));
+          console.log(`⚠️  Turnstile验证未完成（token长度: ${tokenLen}, 容器类名: ${cls || '无'}）`);
+        }
         await page.waitForTimeout(2000);
       }
 
