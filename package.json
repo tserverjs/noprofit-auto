@@ -1,7 +1,7 @@
 {
   "name": "noprofit-auto-login",
-  "version": "1.0.0",
-  "description": "自动登录 noprofit.space 的 Playwright 脚本",
+  "version": "1.1.0",
+  "description": "自动登录 noprofit.space 的脚本，基于 Camoufox（C++级反检测Firefox）绕过Cloudflare验证",
   "main": "login.js",
   "scripts": {
     "start": "node login.js",
@@ -9,13 +9,13 @@
   },
   "dependencies": {
     "camoufox-js": "^0.13.0",
-    "cloakbrowser": "^0.6.4",
     "dotenv": "^16.4.5",
-    "playwright": "^1.62.1",
-    "playwright-core": "^1.62.1"
+    "playwright": "^1.49.0"
   },
   "keywords": [
     "playwright",
+    "camoufox",
+    "cloudflare",
     "auto-login",
     "noprofit"
   ],
