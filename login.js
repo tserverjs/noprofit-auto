@@ -1,4 +1,3 @@
-const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
@@ -21,6 +20,25 @@ try {
     console.error('❌ 错误: 请设置 NOPROFIT_USERNAME 和 NOPROFIT_PASSWORD 环境变量');
     process.exit(1);
   }
+
+  // 快速失败预检：cloakbrowser / camoufox-js 至少装好一个
+  // 标准 Chromium 无法通过 Cloudflare Turnstile 自动验证，不再作为兜底
+  let cloakOk = false;
+  let camoufoxOk = false;
+  try {
+    await import('cloakbrowser');
+    cloakOk = true;
+  } catch (e) {}
+  try {
+    await import('camoufox-js');
+    camoufoxOk = true;
+  } catch (e) {}
+  if (!cloakOk && !camoufoxOk) {
+    console.error('❌ 错误: cloakbrowser 和 camoufox-js 均未安装或损坏，无法完成登录（标准 Chromium 过不了 Cloudflare Turnstile）');
+    console.error('   请确认 package.json 包含 cloakbrowser、camoufox-js 依赖，并在仓库根目录执行 npm install 后重试');
+    process.exit(1);
+  }
+  console.log(`🔍 浏览器预检: cloakbrowser=${cloakOk ? '✅' : '❌'}, camoufox-js=${camoufoxOk ? '✅' : '❌'}`);
 
   // 创建录制目录
   const recordDir = path.resolve(__dirname, 'recordings');
@@ -52,12 +70,13 @@ try {
     try {
       console.log(`\n🚀 开始第 ${attempt} 次登录尝试...`);
 
-      // 浏览器启动 - 优先使用 cloakbrowser（免费 stealth Chromium，Playwright 兼容）
-      // 它在源码层修补了指纹/自动化信号（Turnstile 等检测通过率更高）
-      // 不可用或启动失败时自动回退到标准 Playwright Chromium
-      // 注意：cloakbrowser 是 ESM 包，CJS 里必须用动态 import()
-      console.log('🌐 正在启动浏览器（优先 cloakbrowser，失败则回退 Playwright Chromium）...');
+      // 浏览器启动 - 两级 stealth 方案，逐级回退（标准 Chromium 过不了 CF Turnstile，已弃用）：
+      // 1. cloakbrowser（stealth Chromium，Playwright 兼容）
+      // 2. camoufox-js / Camoufox（stealth Firefox，Playwright 原生驱动）
+      // 注意：cloakbrowser 和 camoufox-js 都是 ESM 包，CJS 里必须用动态 import()
+      console.log('🌐 正在启动浏览器（cloakbrowser → Camoufox）...');
       let useCloak = false;
+      let useCamoufox = false;
       try {
         const { launchContext } = await import('cloakbrowser');
         context = await launchContext({
@@ -77,62 +96,41 @@ try {
         useCloak = true;
         console.log('✅ 已使用 cloakbrowser（stealth Chromium）启动，代理:', proxyServer || '无');
       } catch (e) {
-        console.log(`⚠️  cloakbrowser 不可用或启动失败（${e.message}），回退到标准 Playwright Chromium...`);
+        console.log(`⚠️  cloakbrowser 不可用或启动失败（${e.message}），尝试 Camoufox...`);
       }
 
       if (!useCloak) {
-        if (proxyServer) {
-          console.log('🔌 代理已启用，所有流量将通过代理转发');
+        try {
+          // Camoufox：stealth Firefox，指纹/UA/locale 随机生成并全程一致
+          // 首次启动会自动下载 Camoufox 浏览器构建（约百兆级，缓存在 ~/.cache/camoufox）
+          const { Camoufox } = await import('camoufox-js');
+          let camBrowser;
+          try {
+            camBrowser = await Camoufox({
+              proxy: proxyServer, // string 形式支持 socks5://
+              headless: true,
+              locale: 'en-US',
+              humanize: true // 内置拟人化鼠标/键盘，配合 Turnstile 行为检测
+            });
+            context = await camBrowser.newContext({
+              viewport: { width: 1920, height: 1080 },
+              ignoreHTTPSErrors: true,
+              recordVideo: { dir: videoPath, size: { width: 1920, height: 1080 } }
+            });
+            browser = camBrowser;
+            useCamoufox = true;
+            console.log('✅ 已使用 Camoufox（stealth Firefox）启动，代理:', proxyServer || '无');
+          } catch (innerErr) {
+            await camBrowser?.close?.().catch(() => {});
+            throw innerErr;
+          }
+        } catch (e) {
+          console.log(`⚠️  Camoufox 不可用或启动失败（${e.message}）`);
         }
-        // 标准 Playwright 启动参数 - 针对 CI + Cloudflare 优化
-        const launchOptions = {
-          headless: true,
-          args: ['--no-sandbox', '--disable-dev-shm-usage']
-        };
-        if (proxyServer) {
-          launchOptions.proxy = { server: proxyServer };
-        }
-        browser = await chromium.launch(launchOptions);
-        context = await browser.newContext({
-          viewport: { width: 1920, height: 1080 },
-          userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-          recordVideo: { dir: videoPath, size: { width: 1920, height: 1080 } },
-          ignoreHTTPSErrors: true,
-          bypassCSP: true
-        });
       }
 
-      // 仅标准 Playwright 需要注入反检测脚本；
-      // cloakbrowser 已在源码层修补，额外的 CDP 注入反而可能被检测
-      if (!useCloak) {
-        // 绕过 webdriver 检测
-        await context.addInitScript(() => {
-          Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-          });
-          // 覆盖Chrome自动化属性
-          window.chrome = {
-            runtime: {},
-            loadTimes: function(){},
-            csi: function(){},
-            app: {}
-          };
-          // 伪造插件
-          Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-          });
-          // 伪造语言
-          Object.defineProperty(navigator, 'languages', {
-            get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-          });
-          // 伪造权限
-          const originalQuery = window.navigator.permissions.query;
-          window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-              Promise.resolve({ state: Notification.permission }) :
-              originalQuery(parameters)
-          );
-        });
+      if (!useCloak && !useCamoufox) {
+        throw new Error('stealth 浏览器（cloakbrowser / Camoufox）均启动失败，标准 Chromium 无法通过 Cloudflare Turnstile，终止本次尝试');
       }
 
       page = await context.newPage();
