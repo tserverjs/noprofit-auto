@@ -1,24 +1,11 @@
-# 依赖目录
 node_modules/
-
-# 环境变量
 .env
-
-# 登录状态文件
-storage-state.json
-*.json
-!package.json
-!package-lock.json
-
-# 录制和截图目录
 recordings/
-*.png
 *.webm
-
-# Playwright 缓存
-playwright-report/
-test-results/
-
-# 系统文件
+storage-state.json
+gost
+gost_*.tar.gz
+gost.log
+login-output.log
 .DS_Store
-Thumbs.db
+*.log
