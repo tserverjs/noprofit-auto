@@ -1,0 +1,21 @@
+{
+  "name": "noprofit-auto-login",
+  "version": "1.0.0",
+  "description": "自动登录 noprofit.space 的 Playwright 脚本",
+  "main": "login.js",
+  "scripts": {
+    "start": "node login.js",
+    "debug": "DEBUG=pw:* node login.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.45.0"
+  },
+  "keywords": [
+    "playwright",
+    "auto-login",
+    "noprofit"
+  ],
+  "author": "",
+  "license": "MIT"
+}
